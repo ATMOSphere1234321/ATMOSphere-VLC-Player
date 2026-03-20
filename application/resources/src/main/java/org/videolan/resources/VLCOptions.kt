@@ -174,6 +174,18 @@ object VLCOptions {
             options.add("soxr")
             options.add("--audiotrack-session-id=$audiotrackSessionId")
 
+            // ATMOSphere: Force AudioTrack audio output at libVLC instance level.
+            // AAudio (default on Android 8+) has routing issues with RK3588 multi-output
+            // audio HAL (ES8388 + HDMI + SPDIF). Setting --aout here ensures the audio
+            // module is correct from initialization, not just via setAudioOutput() API.
+            options.add("--aout=android_audiotrack")
+
+            // ATMOSphere: Force software decoding at libVLC level.
+            // RK3588 HW codecs (c2.rk.*) crash with BAD_INDEX on secondary display
+            // and have various issues with MediaCodec on Android 15. VLC's internal
+            // avcodec SW decoders handle all formats reliably.
+            options.add("--avcodec-hw=none")
+
             if (isVLC4()) options.add("--sub-text-scale=" + (1600 / freetypeRelFontsize!!.toFloat()).toString()) else options.add("--freetype-rel-fontsize=" + freetypeRelFontsize!!)
             if (freetypeBold) options.add("--freetype-bold")
             options.add("--freetype-color=$freetypeColor")
@@ -261,7 +273,9 @@ object VLCOptions {
         if (hwaout == VlcMigrationHelper.AudioOutput.OPENSLES)
             aout = AOUT_OPENSLES
 
-        return if (aout == AOUT_OPENSLES) "opensles" else if (aout == AOUT_AUDIOTRACK) "audiotrack" else null /* aaudio is the default */
+        // ATMOSphere: Default to AudioTrack on RK3588 — AAudio has routing issues
+        // with multi-output HAL (ES8388 + HDMI + BT simultaneously)
+        return if (aout == AOUT_OPENSLES) "opensles" else "audiotrack"
     }
 
     private fun getDeblocking(deblocking: Int): Int {
@@ -303,6 +317,12 @@ object VLCOptions {
             } catch (ignored: NumberFormatException) {}
 
         }
+        // ATMOSphere: Treat "automatic" (-1) as "disabled" on RK3588.
+        // RK3588 HW codecs (c2.rk.*) crash with BAD_INDEX/C2_BAD_VALUE on
+        // secondary display and WebView H.264 streams. VLC's internal avcodec
+        // SW decoders handle all formats including 4K reliably.
+        if (hardwareAcceleration == HW_ACCELERATION_AUTOMATIC)
+            hardwareAcceleration = HW_ACCELERATION_DISABLED
         if (hardwareAcceleration == HW_ACCELERATION_DISABLED)
             media.setHWDecoderEnabled(false, false)
         else if (hardwareAcceleration == HW_ACCELERATION_FULL || hardwareAcceleration == HW_ACCELERATION_DECODING) {
