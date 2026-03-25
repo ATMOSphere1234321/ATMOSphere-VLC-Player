@@ -541,7 +541,11 @@ open class VideoPlayerActivity : AppCompatActivity(), PlaybackService.Callback, 
         audioMax = audiomanager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
         isAudioBoostEnabled = settings.getBoolean(KEY_AUDIO_BOOST, true)
 
-        enableCloneMode = clone ?: settings.getBoolean(KEY_ENABLE_CLONE_MODE, false)
+        // ATMOSphere: Auto-enable clone mode when secondary display (HDMI TV) is connected.
+        // This renders video directly on the TV via VLC's built-in Presentation support,
+        // showing remote control UI on the primary touch screen.
+        val hasSecondary = org.videolan.vlc.gui.helpers.UiTools.hasSecondaryDisplay(this)
+        enableCloneMode = clone ?: if (hasSecondary) true else settings.getBoolean(KEY_ENABLE_CLONE_MODE, false)
         displayManager = DisplayManager(this, PlaybackService.renderer, false, enableCloneMode, isBenchmark)
         setContentView(if (displayManager.isPrimary) R.layout.player else R.layout.player_remote_control)
 
