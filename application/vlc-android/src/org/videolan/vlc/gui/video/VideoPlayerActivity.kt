@@ -338,6 +338,13 @@ open class VideoPlayerActivity : AppCompatActivity(), PlaybackService.Callback, 
      */
     private var playbackStarted = false
 
+    // ATMOSphere dual-display: explicit Presentation pathway that hands the TV
+    // SurfaceView straight to libvlc via `IVLCVout.setVideoSurface(...)`. Default
+    // path remains VLC's own DisplayManager clone-mode; this is opt-in via
+    // `setprop vlc.atmosphere.use_atmosphere_presentation true` so the pre-build
+    // gate (CM-MC18) can verify the code path exists in the compiled APK.
+    private var atmospherePresentation: VideoSecondaryPresentation? = null
+
     // Navigation handling (DVD, Blu-Ray...)
     var menuIdx = -1
     var isNavMenu = false
@@ -545,8 +552,25 @@ open class VideoPlayerActivity : AppCompatActivity(), PlaybackService.Callback, 
         // This renders video directly on the TV via VLC's built-in Presentation support,
         // showing remote control UI on the primary touch screen.
         val hasSecondary = org.videolan.vlc.gui.helpers.UiTools.hasSecondaryDisplay(this)
-        enableCloneMode = clone ?: if (hasSecondary) true else settings.getBoolean(KEY_ENABLE_CLONE_MODE, false)
+        val atmosphereDualOptOut = readAtmosphereSysprop("vlc.atmosphere.dual_display", "true")
+                .equals("false", ignoreCase = true)
+        val useAtmospherePresentation = readAtmosphereSysprop(
+                "vlc.atmosphere.use_atmosphere_presentation", "false")
+                .equals("true", ignoreCase = true)
+        // If the ATMOSphere opt-out sysprop is set, fall back to VLC's stock behaviour
+        // (no auto-clone). Otherwise keep the firmware's default (auto-enable clone
+        // when a secondary display is attached).
+        enableCloneMode = clone ?: when {
+            atmosphereDualOptOut -> settings.getBoolean(KEY_ENABLE_CLONE_MODE, false)
+            useAtmospherePresentation -> false // our Presentation runs instead of clone
+            hasSecondary -> true
+            else -> settings.getBoolean(KEY_ENABLE_CLONE_MODE, false)
+        }
         displayManager = DisplayManager(this, PlaybackService.renderer, false, enableCloneMode, isBenchmark)
+        if (!atmosphereDualOptOut && useAtmospherePresentation && hasSecondary) {
+            maybeSetupAtmospherePresentation()
+        }
+        notifyAtmospherePresenterVideoState("VIDEO_START")
         setContentView(if (displayManager.isPrimary) R.layout.player else R.layout.player_remote_control)
 
 
@@ -1034,6 +1058,84 @@ open class VideoPlayerActivity : AppCompatActivity(), PlaybackService.Callback, 
 
         // Dismiss the presentation when the activity is not visible.
         displayManager.release()
+
+        // ATMOSphere: tear down explicit Presentation (if any) and tell Presenter we stopped.
+        atmospherePresentation?.let { pres ->
+            try { pres.dismiss() } catch (_: Throwable) {}
+        }
+        atmospherePresentation = null
+        notifyAtmospherePresenterVideoState("VIDEO_STOP")
+    }
+
+    /**
+     * ATMOSphere: read a system property via reflection (the public SystemProperties
+     * API is hidden). Returns `defaultValue` on any failure.
+     */
+    private fun readAtmosphereSysprop(key: String, defaultValue: String): String = try {
+        val propClass = Class.forName("android.os.SystemProperties")
+        val getMethod = propClass.getMethod("get", String::class.java, String::class.java)
+        getMethod.invoke(null, key, defaultValue) as String
+    } catch (e: Throwable) {
+        defaultValue
+    }
+
+    /**
+     * ATMOSphere: stand up our own Presentation on the secondary display and bind
+     * its SurfaceView directly to libvlc via `IVLCVout.setVideoSurface(...)`. This
+     * runs *instead of* VLC's native clone mode when
+     * `vlc.atmosphere.use_atmosphere_presentation=true`.
+     */
+    private fun maybeSetupAtmospherePresentation() {
+        val dm = getSystemService(Context.DISPLAY_SERVICE)
+                as? android.hardware.display.DisplayManager ?: return
+        val displays = dm.getDisplays(
+                android.hardware.display.DisplayManager.DISPLAY_CATEGORY_PRESENTATION)
+        val target = displays.firstOrNull() ?: return
+        Log.i(TAG, "ATMOSphere: binding VLC to Presentation on display ${target.displayId} (${target.name})")
+        lateinit var presentation: VideoSecondaryPresentation
+        presentation = VideoSecondaryPresentation(
+                this,
+                target,
+                onReady = {
+                    try {
+                        val vlcVout = service?.vout
+                        if (vlcVout != null) {
+                            vlcVout.setVideoSurface(presentation.videoSurface, null)
+                            if (!vlcVout.areViewsAttached()) {
+                                service?.mediaplayer?.attachViews(videoLayout!!, displayManager, true, false)
+                            }
+                        }
+                    } catch (e: Throwable) {
+                        Log.w(TAG, "ATMOSphere: setVideoSurface failed: ${e.message}")
+                    }
+                },
+                onChanged = { _, _ -> },
+                onLost = {
+                    try { service?.vout?.detachViews() } catch (_: Throwable) {}
+                },
+        )
+        try {
+            presentation.show()
+            atmospherePresentation = presentation
+        } catch (e: Throwable) {
+            Log.w(TAG, "ATMOSphere: presentation.show() failed: ${e.message}")
+        }
+    }
+
+    /**
+     * ATMOSphere: let PresenterService know the VLC fork has taken over video
+     * playback so it can hide its own Presentation overlay.
+     */
+    private fun notifyAtmospherePresenterVideoState(state: String) {
+        try {
+            val intent = android.content.Intent("com.atmosphere.presenter.MEDIA_STATE_CHANGED")
+            intent.setPackage("com.atmosphere.presenter")
+            intent.putExtra("package", packageName)
+            intent.putExtra("state", state)
+            sendBroadcast(intent)
+        } catch (e: Throwable) {
+            Log.d(TAG, "ATMOSphere: Presenter notify ($state) failed: ${e.message}")
+        }
     }
 
     @TargetApi(Build.VERSION_CODES.JELLY_BEAN_MR1)

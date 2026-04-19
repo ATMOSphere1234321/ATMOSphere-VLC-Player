@@ -43,7 +43,7 @@ allprojects {
 
 ext {
     appId = "atmosphere.videolan.vlc"
-    versionCode = 3070010
+    versionCode = 3070020
     vlcMajorVersion = project.hasProperty('forceVlc4') && project.getProperty('forceVlc4') ? 4 : 3
     versionName = vlcMajorVersion == 3 ? '3.7.1 Beta 1' : '4.0.0-preview - ' + versionCode
     remoteAccessVersion = '0.12.0'
