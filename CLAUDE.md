@@ -65,3 +65,36 @@ Fork of VLC for Android, customized for ATMOSphere firmware on Orange Pi 5 Max (
 - Build via parent: `bash scripts/build.sh --skip-pull --skip-tests --skip-ota`
 - Tests via parent: `bash device/rockchip/rk3588/tests/pre_build_verification.sh`
 - SMB/CIFS network browsing supported (kernel CIFS module enabled)
+
+---
+
+## MANDATORY: ATMOSphere Constitution compliance (appended 2026-04-19 — ATMOSphere 1.1.3-dev-0.0.6)
+
+Every change in this submodule MUST comply with the canonical
+Constitution at `docs/guides/ATMOSPHERE_CONSTITUTION.md` in the parent
+repo. In summary:
+
+1. **Test coverage for every change** — pre-build gate (CM-MC*),
+   post-build gate, on-device test, and a mutation entry in
+   `scripts/testing/meta_test_false_positive_proof.sh` proving the
+   gate catches regressions.
+2. **Device validation before any tag** — both D1 and D2 flashed and
+   green on every relevant suite.
+3. **Commit + push via `bash scripts/commit_all.sh "…"` from the
+   parent repo root.** Submodule source changes are committed in the
+   submodule itself first, pushed to every remote of that submodule,
+   and then the parent's `commit_all.sh` captures the updated
+   pointer.
+4. **Tags cascade.** Every version tag on the main repo is mirrored
+   on this submodule at its current HEAD, across every remote this
+   submodule publishes to. Use
+   `scripts/testing/release_tag.sh <tag>` from the parent repo.
+5. **Changelog discipline.** `docs/changelogs/<tag>.{md,html,json,txt}`
+   on the parent repo documents every release; exported via
+   `scripts/testing/export_changelog.sh`.
+6. **No false-success results.** Tests that are always-PASS are
+   immediately rewritten. Meta-test mutations catch bluff gates.
+7. **Flock.** `commit_all.sh` and `push_all.sh` are serialised via
+   `.git/.commit_all.lock` / `.git/.push_all.lock`. Never bypass.
+
+Non-compliance is a blocker regardless of context.
