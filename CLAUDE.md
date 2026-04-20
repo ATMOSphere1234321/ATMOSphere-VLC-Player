@@ -98,3 +98,30 @@ repo. In summary:
    `.git/.commit_all.lock` / `.git/.push_all.lock`. Never bypass.
 
 Non-compliance is a blocker regardless of context.
+
+
+## MANDATORY ABSOLUTE DATA SAFETY — ZERO RISK (Constitution §9)
+
+**EVERY destructive repository operation** (history rewrite, force-push,
+branch deletion, bulk file removal, submodule de-init, object pruning) MUST
+follow Constitution §9 without exception:
+
+1. **Hardlinked backup first** — near-instant (`cp -al .git <backup>/repo.git.mirror`),
+   zero extra disk. No excuse to skip. Parent-repo helper:
+   `scripts/testing/safe_history_rewrite.sh --pre-op`.
+2. **Record pre-op metadata** — refs, tags, submodule pointers, HEAD commit,
+   HEAD tree hash, HEAD tree content sha256.
+3. **Run the operation** — never with hook-bypassing flags unless the user
+   has explicitly authorized them for that exact operation.
+4. **Post-op gate** — HEAD tree byte-identical (unless explicitly expected
+   to change), all tags preserved, all submodule pointers intact, all
+   domain-specific integrity checks pass. ANY failure → restore immediately
+   from the hardlinked backup.
+5. **Force-push is NEVER automatic** — `push_all.sh` (in parent repo) must
+   not force-push as a failure-recovery path. Every force-push requires
+   explicit per-session human authorization AND a passing §9 post-op gate.
+6. **Audit trail** — force-push events recorded in parent repo
+   `docs/changelogs/<tag>.md`.
+
+Data-safety violations are catastrophic (irreversible once the remote GCs
+dangling objects) and block the release cycle until fully remediated.
