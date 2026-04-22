@@ -323,6 +323,13 @@ class PlaybackService : MediaBrowserServiceCompat(), LifecycleOwner, CoroutineSc
     }
 
     private val mediaPlayerListener = MediaPlayer.EventListener { event ->
+        // QA 26.04.01 User #6 Tier C1 — Dispatch every MediaPlayer event to
+        // the ATMOSphere subtitle forwarder so Presenter learns of subtitle
+        // track changes and end-of-playback (so it can clear stale cues on
+        // the secondary display). libvlc doesn't expose per-cue text in
+        // Java today; forwardCue() is reserved for a future JNI binding
+        // of libvlc_video_set_subtitle_text_callback.
+        AtmosphereSubtitleForwarder.onEvent(event)
         when (event.type) {
             MediaPlayer.Event.Playing -> {
                 if (BuildConfig.DEBUG) Log.i(TAG, "MediaPlayer.Event.Playing")
