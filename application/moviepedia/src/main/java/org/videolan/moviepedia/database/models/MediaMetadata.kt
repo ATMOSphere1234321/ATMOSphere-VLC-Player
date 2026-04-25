@@ -79,7 +79,7 @@ class MediaMetadataWithImages {
     @Relation(parentColumn = "show_id", entityColumn = "moviepedia_id", entity = MediaMetadata::class)
     lateinit var show: MediaMetadata
 
-    @Ignore
+    @Ignore  // SKIP-OK: #legacy-untriaged
     var media: MediaWrapper? = null
 
     @Relation(parentColumn = "moviepedia_id", entityColumn = "media_id", entity = MediaImage::class)
