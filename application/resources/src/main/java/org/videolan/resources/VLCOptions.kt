@@ -180,11 +180,17 @@ object VLCOptions {
             // module is correct from initialization, not just via setAudioOutput() API.
             options.add("--aout=android_audiotrack")
 
-            // ATMOSphere: Force software decoding at libVLC level.
-            // RK3588 HW codecs (c2.rk.*) crash with BAD_INDEX on secondary display
-            // and have various issues with MediaCodec on Android 15. VLC's internal
-            // avcodec SW decoders handle all formats reliably.
-            options.add("--avcodec-hw=none")
+            // §GS-1b: allow HW decode (--avcodec-hw=any) — v4l2m2m if contrib supports it, SW fallback safe.
+            // Previously "--avcodec-hw=none" forced SW decode because RK3588 c2.rk MediaCodec
+            // crashes (BAD_INDEX) and is globally disabled (Fix #107). "any" lets libVLC try its
+            // available avcodec HW backends (FFmpeg v4l2m2m → Rockchip kernel rkvdec, IF the
+            // VideoLAN contrib FFmpeg was built with it) and fall back to SW automatically when
+            // no HW backend is present — so playback NEVER breaks regardless.
+            // UNCONFIRMED: VLC's prebuilt VideoLAN contrib FFmpeg v4l2m2m support is not yet
+            //   verified — on-device validation required (does VLC engage mpp_service?).
+            //   The "any" setting is safe either way (auto-fallback to SW). The HW_ACCELERATION
+            //   default below is intentionally left unchanged this round (on-device-validation-gated).
+            options.add("--avcodec-hw=any")
 
             // §GS-2: enable 5.1 multichannel HDMI output (was stereo-downmixed).
             // Do NOT force a fixed channel count and do NOT force a stereo/Dolby
