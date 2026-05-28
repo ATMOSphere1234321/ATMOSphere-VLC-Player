@@ -1693,6 +1693,13 @@ open class VideoPlayerActivity : AppCompatActivity(), PlaybackService.Callback, 
                     }
                 }
                 MediaPlayer.Event.Vout -> {
+                    // §GS-3: also clear loading on Playing/Vout (buffering may never hit 100% on SW decode).
+                    // onPlaying() already calls stopLoading() on the Playing event; the Vout event (first
+                    // video frame output) is the additional safety net so the perpetual spinner hides once
+                    // a frame is actually rendered even if Buffering never reports 100f. stopLoading() is
+                    // idempotent (no-ops when !isLoading), so this cannot affect the existing buffering path.
+                    if (event.voutCount > 0)
+                        stopLoading()
                     updateNavStatus()
                     if (event.voutCount > 0)
                         service.mediaplayer.updateVideoSurfaces()

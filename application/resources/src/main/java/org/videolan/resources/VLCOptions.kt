@@ -186,6 +186,21 @@ object VLCOptions {
             // avcodec SW decoders handle all formats reliably.
             options.add("--avcodec-hw=none")
 
+            // §GS-2: enable 5.1 multichannel HDMI output (was stereo-downmixed).
+            // Do NOT force a fixed channel count and do NOT force a stereo/Dolby
+            // downmix — that is what collapses 5.1 to 2ch. Leaving the channel
+            // layout unconstrained lets the android_audiotrack aout negotiate the
+            // widest layout the active sink accepts (5.1/7.1 PCM on the HDMI/Arvus
+            // path via Fix #112 multichannel LPCM; 2ch on ES8388/USB/BT jacks).
+            // SAFETY: this is PCM multichannel, NOT bitstream passthrough — it does
+            // NOT touch the non-HDMI ES8388/USB/BT outputs (they simply downmix to
+            // their native 2ch as before). KEY_AUDIO_DIGITAL_OUTPUT (raw AC3/DTS
+            // bitstream passthrough) is intentionally left at its default (OFF):
+            // enabling it globally WOULD silence ES8388/USB/BT which cannot decode
+            // a raw bitstream — that delicate HDMI-only opt-in REQUIRES on-device
+            // validation (Arvus codec-state + non-HDMI jack audio) before flipping.
+            options.add("--stereo-mode=0")
+
             if (isVLC4()) options.add("--sub-text-scale=" + (1600 / freetypeRelFontsize!!.toFloat()).toString()) else options.add("--freetype-rel-fontsize=" + freetypeRelFontsize!!)
             if (freetypeBold) options.add("--freetype-bold")
             options.add("--freetype-color=$freetypeColor")
