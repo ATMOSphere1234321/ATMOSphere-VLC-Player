@@ -259,7 +259,23 @@ static def hostName(project) {
         }
         return 'Unknown'
     }
-    return "${System.getProperty("user.name")}@${InetAddress.localHost.hostName}"
+    // §C1 build-fix (2026-05-30): InetAddress.localHost.hostName calls
+    // java.net.InetAddress.getLocalHost().getHostName(), which throws
+    // java.net.UnknownHostException when the host's own hostname does not
+    // resolve via DNS / /etc/hosts. This is the default state inside the
+    // §12.9 podman AOSP-build container — the unhandled exception aborted
+    // project evaluation here ("A problem occurred evaluating project
+    // ':application:vlc-android'." at build.gradle line 262). The host name
+    // is purely cosmetic (BuildConfig build_host resValue line 28), so a
+    // resolution failure must degrade gracefully, never break the build.
+    def userName = System.getProperty("user.name") ?: "builder"
+    def host
+    try {
+        host = InetAddress.localHost.hostName
+    } catch (Exception ignored) {
+        host = "localhost"
+    }
+    return "${userName}@${host}"
 }
 
 def dav1dVersion() {
