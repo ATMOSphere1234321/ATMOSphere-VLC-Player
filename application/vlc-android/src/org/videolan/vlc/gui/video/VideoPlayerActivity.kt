@@ -570,7 +570,22 @@ open class VideoPlayerActivity : AppCompatActivity(), PlaybackService.Callback, 
         if (!atmosphereDualOptOut && useAtmospherePresentation && hasSecondary) {
             maybeSetupAtmospherePresentation()
         }
-        notifyAtmospherePresenterVideoState("VIDEO_START")
+        // §HF (Bug, belt-and-suspenders, 2026-05-30) — only claim TV-routing to
+        // the Presenter when an external secondary display actually exists.
+        // Previously this VIDEO_START broadcast fired UNCONDITIONALLY (outside
+        // the hasSecondary guard above), so on a 0-external-display device (D4)
+        // it triggered Presenter.handleIntegratedVideoStart → a spurious
+        // "playing on TV" VideoControlOverlay on the primary. The authoritative
+        // fix is the Presenter-side secondaryDisplayFound guard; this client-side
+        // gate is defense-in-depth so the client never lies about TV-routing.
+        // VIDEO_STOP stays UNGATED (line ~1067) — a stop must always propagate
+        // so a band can be dismissed regardless of current topology.
+        // §11.4.8 / §11.4.99: original work — UiTools.hasSecondaryDisplay() wraps
+        // DisplayManager.getDisplays() (canonical external-display API,
+        // https://developer.android.com/reference/android/hardware/display/DisplayManager#getDisplays()).
+        if (hasSecondary) {
+            notifyAtmospherePresenterVideoState("VIDEO_START")
+        }
         setContentView(if (displayManager.isPrimary) R.layout.player else R.layout.player_remote_control)
 
 
