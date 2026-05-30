@@ -299,8 +299,17 @@ if [ ! -d "$VLC_LIBJNI_PATH" ] || [ ! -d "$VLC_LIBJNI_PATH/.git" ]; then
         cd libvlcjni
         git init
         git remote add origin "${LIBVLCJNI_REPOSITORY}"
-        git pull origin ${LIBVLCJNI_BRANCH}
+        # §C1 build-fix: fetch (NOT pull) — a `git pull` MERGE aborts when a
+        # gradle-generated untracked file (e.g. libvlc/build.gradle) sits at a
+        # path the upstream branch tracks ("untracked working tree files would
+        # be overwritten by merge"). The `git reset --hard ${LIBVLCJNI_TESTED_HASH}`
+        # below does the deterministic pin, so the merge is redundant; fetch
+        # brings the objects without touching the working tree.
+        git fetch origin ${LIBVLCJNI_BRANCH}
     fi
+    # §C1 build-fix: clear untracked gradle leftovers so reset --hard lands a
+    # pristine pinned tree (reset --hard does not remove untracked files).
+    git clean -fdq 2>/dev/null || true
     git reset --hard ${LIBVLCJNI_TESTED_HASH} || fail "libvlcjni sources: LIBVLCJNI_TESTED_HASH ${LIBVLCJNI_TESTED_HASH} not found"
     init_local_props local.properties || { echo "Error initializing local.properties"; exit $?; }
     cd ..
