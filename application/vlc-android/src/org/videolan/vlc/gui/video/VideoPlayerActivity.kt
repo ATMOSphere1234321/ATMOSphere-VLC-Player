@@ -554,15 +554,33 @@ open class VideoPlayerActivity : AppCompatActivity(), PlaybackService.Callback, 
         val hasSecondary = org.videolan.vlc.gui.helpers.UiTools.hasSecondaryDisplay(this)
         val atmosphereDualOptOut = readAtmosphereSysprop("vlc.atmosphere.dual_display", "true")
                 .equals("false", ignoreCase = true)
+        // ATMOSphere #18 [ATM-284] (1.1.8-dev, 2026-06-03): the Presenter-owned
+        // self-routing path (maybeSetupAtmospherePresentation → IVLCVout.
+        // setVideoSurface on the display-2 Presentation surface) is now the
+        // DEFAULT when an external secondary display is attached — mirroring the
+        // MPV fork's `mpv.atmosphere.dual_display`-default-on pattern
+        // (MPVActivity.maybeSetupSecondaryDisplay). The prior default ("false")
+        // meant maybeSetupAtmospherePresentation NEVER ran, so VLC's video
+        // SurfaceView stayed on display 0 (RED-captured 2026-06-03,
+        // qa-results/vlc_system_video_20260603/RED/: VLC on LayerStack=0, display 2
+        // = Presenter only). VLC's built-in clone mode renders the WHOLE remote-UI
+        // composite, not video-only, so it cannot satisfy §HG (video-ONLY on the
+        // secondary). The Presentation path binds ONLY the decoder output surface
+        // to display 2 — §HG-clean by construction, same as MPV.
+        // Opt-out: `setprop vlc.atmosphere.use_atmosphere_presentation false`
+        // (falls back to VLC clone mode). Full disable: `setprop
+        // vlc.atmosphere.dual_display false`.
+        // §11.4.8 / §11.4.99: reference = the proven-working MPV self-routing fork
+        // (device/rockchip/atmosphere/mpv-player MPVActivity.kt:401-455).
         val useAtmospherePresentation = readAtmosphereSysprop(
-                "vlc.atmosphere.use_atmosphere_presentation", "false")
+                "vlc.atmosphere.use_atmosphere_presentation", "true")
                 .equals("true", ignoreCase = true)
         // If the ATMOSphere opt-out sysprop is set, fall back to VLC's stock behaviour
-        // (no auto-clone). Otherwise keep the firmware's default (auto-enable clone
-        // when a secondary display is attached).
+        // (no auto-clone). Otherwise prefer the Presentation self-routing path (video-
+        // only on display 2) over VLC's whole-UI clone mode.
         enableCloneMode = clone ?: when {
             atmosphereDualOptOut -> settings.getBoolean(KEY_ENABLE_CLONE_MODE, false)
-            useAtmospherePresentation -> false // our Presentation runs instead of clone
+            useAtmospherePresentation && hasSecondary -> false // our Presentation runs instead of clone
             hasSecondary -> true
             else -> settings.getBoolean(KEY_ENABLE_CLONE_MODE, false)
         }
@@ -1079,6 +1097,8 @@ open class VideoPlayerActivity : AppCompatActivity(), PlaybackService.Callback, 
             try { pres.dismiss() } catch (_: Throwable) {}
         }
         atmospherePresentation = null
+        // ATMOSphere #18 [ATM-284]: re-arm first-frame signal for the next session.
+        atmosphereFirstFrameSent = false
         notifyAtmospherePresenterVideoState("VIDEO_STOP")
     }
 
@@ -1153,6 +1173,33 @@ open class VideoPlayerActivity : AppCompatActivity(), PlaybackService.Callback, 
         }
     }
 
+    // ATMOSphere #18 [ATM-284] (1.1.8-dev, 2026-06-03): fire EXACTLY ONCE per
+    // playback session, on the FIRST libVLC Vout event (first decoded video
+    // frame output to the surface). The Presenter notification/overlay "active"
+    // state was previously latched on activeVideoPackage != null (set at
+    // VIDEO_START broadcast time — i.e. at INTENT, before any frame exists), so
+    // the System notification stayed stuck on "Loading…" even after the movie
+    // visibly played. Forwarding a real first-frame signal lets the Presenter
+    // gate the loading→active transition on ACTUAL frame arrival, not on the
+    // mere intent to play. Reset to false on STOP/EndReached so the next
+    // playback session re-arms. §11.4.107 liveness: a single VIDEO_START is NOT
+    // proof of playback; the Vout-driven first-frame IS.
+    @Volatile private var atmosphereFirstFrameSent = false
+    private fun notifyAtmospherePresenterVideoFirstFrame() {
+        if (atmosphereFirstFrameSent) return
+        atmosphereFirstFrameSent = true
+        try {
+            val intent = android.content.Intent("com.atmosphere.presenter.MEDIA_STATE_CHANGED")
+            intent.setPackage("com.atmosphere.presenter")
+            intent.putExtra("package", packageName)
+            intent.putExtra("state", "VIDEO_FIRSTFRAME")
+            sendBroadcast(intent)
+            Log.i(TAG, "ATMOSphere: notified Presenter of first video frame (Vout)")
+        } catch (e: Throwable) {
+            Log.d(TAG, "ATMOSphere: Presenter first-frame notify failed: ${e.message}")
+        }
+    }
+
     @TargetApi(Build.VERSION_CODES.JELLY_BEAN_MR1)
     private fun startPlayback() {
         /* start playback only when audio service and both surfaces are ready */
@@ -1169,7 +1216,35 @@ open class VideoPlayerActivity : AppCompatActivity(), PlaybackService.Callback, 
                     vlcVout.detachViews()
             }
             val mediaPlayer = mediaplayer
-            if (!displayManager.isOnRenderer) videoLayout?.let {
+            // ATMOSphere #18 [ATM-284] (1.1.8-dev, 2026-06-03): when our Presenter-
+            // owned secondary Presentation is active, libVLC's vout is bound to the
+            // display-2 surface via IVLCVout.setVideoSurface in
+            // maybeSetupAtmospherePresentation.onReady. The stock
+            // attachViews(videoLayout, …) below re-binds vout to the display-0
+            // VLCVideoLayout, OVERWRITING the secondary binding — this is exactly
+            // the race that left VLC video on display 0 (RED-captured 2026-06-03).
+            // Suppress the display-0 attach in that mode (the MPV-fork analogue of
+            // BaseMPVView.useExternalSurface=true). Subtitles + UI controls still
+            // render on display 0; only the decoded VIDEO goes to display 2 — §HG-
+            // clean. The secondary surface is (re)bound by the Presentation's
+            // surfaceCreated callback (onReady), which fires independently.
+            if (atmospherePresentation != null) {
+                Log.i(TAG, "ATMOSphere: secondary Presentation active — skipping display-0 attachViews (video stays on display 2)")
+                // Re-assert the secondary binding in case startPlayback raced ahead
+                // of the Presentation's surfaceCreated (surface may already exist).
+                try {
+                    val secSurface = atmospherePresentation?.videoSurface
+                    val vlcVout = vout
+                    if (secSurface != null && secSurface.isValid && vlcVout != null) {
+                        vlcVout.setVideoSurface(secSurface, null)
+                        if (!vlcVout.areViewsAttached()) {
+                            mediaPlayer.attachViews(videoLayout!!, displayManager, true, false)
+                        }
+                    }
+                } catch (e: Throwable) {
+                    Log.w(TAG, "ATMOSphere: startPlayback secondary re-bind failed: ${e.message}")
+                }
+            } else if (!displayManager.isOnRenderer) videoLayout?.let {
                 mediaPlayer.attachViews(it, displayManager, true, false)
                 val size = if (isBenchmark) MediaPlayer.ScaleType.SURFACE_FILL else MediaPlayer.ScaleType.entries[settings.getInt(VIDEO_RATIO, MediaPlayer.ScaleType.SURFACE_BEST_FIT.ordinal)]
                 mediaPlayer.videoScale = size
@@ -1715,6 +1790,11 @@ open class VideoPlayerActivity : AppCompatActivity(), PlaybackService.Callback, 
                     // idempotent (no-ops when !isLoading), so this cannot affect the existing buffering path.
                     if (event.voutCount > 0)
                         stopLoading()
+                    // ATMOSphere #18 [ATM-284]: first decoded frame is live —
+                    // tell the Presenter so it can clear its stuck "Loading…"
+                    // notification/overlay (defect #3). Idempotent (fires once).
+                    if (event.voutCount > 0)
+                        notifyAtmospherePresenterVideoFirstFrame()
                     updateNavStatus()
                     if (event.voutCount > 0)
                         service.mediaplayer.updateVideoSurfaces()

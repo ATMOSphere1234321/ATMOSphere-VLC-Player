@@ -229,6 +229,20 @@ MEDIALIBRARY_LDLIBS="-L$LIBVLCJNI_SRC_DIR/libvlc/jni/libs/${ANDROID_ABI}/ -lvlc 
 -L$LIBVLCJNI_SRC_DIR/vlc/contrib/$TARGET_TUPLE/lib -ljpeg \
 -lc++abi"
 
+# §C3 build-fix (ATMOSphere): the ndk-build below invokes
+# `APP_BUILD_SCRIPT=jni/Android.mk`, but the medialibrary module ships only
+# `jni/Android.mk.player` (the canonical ndk-build script — it declares the
+# `mla` shared library + the medialibrary/sqlite prebuilt static libs). No
+# `jni/Android.mk` is committed, so ndk-build aborts:
+#   Android NDK: Your APP_BUILD_SCRIPT points to an unknown file: jni/Android.mk
+#   *** Android NDK: Aborting...
+# Materialise jni/Android.mk from the tracked .player script before ndk-build.
+# Idempotent: re-copies if the .player source is newer than the target.
+if [ -f "${MEDIALIBRARY_MODULE_DIR}/jni/Android.mk.player" ]; then
+  cp -f "${MEDIALIBRARY_MODULE_DIR}/jni/Android.mk.player" \
+        "${MEDIALIBRARY_MODULE_DIR}/jni/Android.mk"
+fi
+
 $NDK_BUILD -C medialibrary \
   APP_STL="$NDK_APP_STL" \
   LOCAL_CPP_FEATURES="rtti exceptions" \

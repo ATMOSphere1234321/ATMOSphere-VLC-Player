@@ -290,15 +290,38 @@ LIBVLCJNI_REPOSITORY=https://code.videolan.org/videolan/libvlcjni.git
 
 : ${VLC_LIBJNI_PATH:="$(pwd -P)/libvlcjni"}
 
-if [ ! -d "$VLC_LIBJNI_PATH" ] || [ ! -d "$VLC_LIBJNI_PATH/.git" ]; then
-    diagnostic "libvlcjni sources: not found, cloning"
+# §C2 build-fix (ATMOSphere): the original guard only checked for the
+# presence of the `.git` directory. A half-initialized libvlcjni repo (where
+# `git init` + `git remote add` + `git fetch` ran but the deterministic
+# `git reset --hard ${LIBVLCJNI_TESTED_HASH}` never completed — leaving "No
+# commits yet" on the branch and the working tree NEVER checked out) passes
+# that guard yet is missing every tracked file, including the
+# `buildsystem/get-vlc.sh` script that line ~368 below invokes → exit 127 →
+# step_build_vlc falls back to the stale prebuilt APK. We additionally treat
+# the repo as "needs recovery" whenever the working tree is not properly
+# checked out, detected by the absence of `buildsystem/get-vlc.sh` (the exact
+# file the fetch-VLC step depends on). The recovery block (git init / remote /
+# fetch / clean -fdq / reset --hard ${LIBVLCJNI_TESTED_HASH}) is idempotent on
+# an already-fetched .git, so re-running it on the broken state simply
+# completes the missing reset --hard and populates the working tree.
+if [ ! -d "$VLC_LIBJNI_PATH" ] || [ ! -d "$VLC_LIBJNI_PATH/.git" ] || [ ! -f "$VLC_LIBJNI_PATH/buildsystem/get-vlc.sh" ]; then
+    diagnostic "libvlcjni sources: not found or working tree not checked out, (re)initializing"
     if [ ! -d "$VLC_LIBJNI_PATH" ]; then
         git clone --single-branch --branch ${LIBVLCJNI_BRANCH} "${LIBVLCJNI_REPOSITORY}"
         cd libvlcjni
-    else # folder exist with only the artifacts
+    else # folder exists with only the artifacts OR a half-initialized .git
         cd libvlcjni
         git init
-        git remote add origin "${LIBVLCJNI_REPOSITORY}"
+        # §C2 build-fix (ATMOSphere): idempotent remote setup. On a half-
+        # initialized repo (§C2 recovery path) `origin` already exists, so a
+        # plain `git remote add origin …` returns non-zero and `set -e` aborts
+        # the build before the reset --hard can populate the working tree. Use
+        # `set-url` when the remote already exists; `add` only when it does not.
+        if git remote get-url origin >/dev/null 2>&1; then
+            git remote set-url origin "${LIBVLCJNI_REPOSITORY}"
+        else
+            git remote add origin "${LIBVLCJNI_REPOSITORY}"
+        fi
         # §C1 build-fix: fetch (NOT pull) — a `git pull` MERGE aborts when a
         # gradle-generated untracked file (e.g. libvlc/build.gradle) sits at a
         # path the upstream branch tracks ("untracked working tree files would

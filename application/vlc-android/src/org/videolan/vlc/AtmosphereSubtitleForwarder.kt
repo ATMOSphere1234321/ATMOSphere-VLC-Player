@@ -30,7 +30,7 @@ package org.videolan.vlc
 import android.os.IBinder
 import android.util.Log
 import org.videolan.libvlc.MediaPlayer
-import org.videolan.medialibrary.interfaces.media.IMedia
+import org.videolan.libvlc.interfaces.IMedia
 
 object AtmosphereSubtitleForwarder {
 
