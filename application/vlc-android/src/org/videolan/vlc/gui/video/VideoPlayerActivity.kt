@@ -272,6 +272,17 @@ open class VideoPlayerActivity : AppCompatActivity(), PlaybackService.Callback, 
     internal var isLoading: Boolean = false
         private set
     private var isPlaying = false
+    // ATMOSphere [ATM-314] §C4 — HW-decode-fail → SW-fallback watchdog state.
+    // RK3588 HW codecs (c2.rk.*) are disabled (Fix #94) and some streams that
+    // request HW decode either emit MediaPlayer.Event.EncounteredError OR stall
+    // silently (no Vout, Buffering never reaches 100%). Upstream VLC-Android has
+    // NO automatic SW fallback (research: androidx/media#2090 — VLC relies on a
+    // manual HW-accel preference, no auto-retry). Without a fallback the loading
+    // spinner spins forever. forceSoftwareDecode is consumed by loadMedia() to
+    // add MEDIA_NO_HWACCEL; hwDecodeRetried guards against an infinite reload
+    // loop (one SW retry per media open).
+    @Volatile private var forceSoftwareDecode = false
+    private var hwDecodeRetried = false
     private var loadingImageView: ImageView? = null
     var enableCloneMode: Boolean = false
     lateinit var orientationMode: PlayerOrientationMode
@@ -394,6 +405,7 @@ open class VideoPlayerActivity : AppCompatActivity(), PlaybackService.Callback, 
                         switchToAudioMode(true)
                     }
                     LOADING_ANIMATION -> startLoading()
+                    LOADING_TIMEOUT -> onLoadingTimeout()
                     HIDE_INFO -> overlayDelegate.hideOverlay(true)
                     SHOW_INFO -> overlayDelegate.showOverlay()
                     HIDE_SEEK -> touchDelegate.hideSeekOverlay()
@@ -1900,6 +1912,24 @@ open class VideoPlayerActivity : AppCompatActivity(), PlaybackService.Callback, 
                             handler.sendEmptyMessageDelayed(LOADING_ANIMATION, LOADING_ANIMATION_DELAY.toLong())
                     }
                 }
+                // ATMOSphere [ATM-314] §C4 — HW-decode-fail → SW-fallback (error
+                // path). When libvlc errors out (RK3588 HW decoder rejects the
+                // stream — c2.rk.* disabled per Fix #94) it emits EncounteredError.
+                // Upstream VLC-Android has no case for this here, so the loading
+                // spinner armed by LOADING_ANIMATION was never cleared and the
+                // PlaylistManager-level handler only stops playback (no SW retry)
+                // → perpetual spinner over a dead player. If HW was in use and we
+                // have not retried yet, restart this media forcing SW decode; else
+                // clear the spinner so the user is not stuck on a frozen overlay.
+                MediaPlayer.Event.EncounteredError -> {
+                    if (!hwDecodeRetried && !forceSoftwareDecode) {
+                        Log.w(TAG, "[ATM-314] EncounteredError — retrying current media with software decode (MEDIA_NO_HWACCEL)")
+                        retryWithSoftwareDecode()
+                    } else {
+                        Log.w(TAG, "[ATM-314] EncounteredError after software-decode retry — clearing loading spinner")
+                        stopLoading()
+                    }
+                }
             }
         }
     }
@@ -2374,6 +2404,12 @@ open class VideoPlayerActivity : AppCompatActivity(), PlaybackService.Callback, 
     @SuppressLint("SdCardPath")
     @TargetApi(12)
     protected open fun loadMedia(fromStart: Boolean = false, forceUsingNew:Boolean = false) {
+        // ATMOSphere [ATM-314] §C4 — a fresh, user-initiated load (NOT the SW
+        // -fallback reload, which sets forceSoftwareDecode before calling here)
+        // resets the one-shot HW-retry guard so each distinct media gets its own
+        // single SW-fallback attempt. The retry reload keeps the guard set, so
+        // it cannot loop.
+        if (!forceSoftwareDecode) hwDecodeRetried = false
         if (fromStart) {
             askResume = false
             intent.putExtra(PLAY_EXTRA_FROM_START, fromStart)
@@ -2482,6 +2518,10 @@ open class VideoPlayerActivity : AppCompatActivity(), PlaybackService.Callback, 
                 itemTitle?.let { media?.title = Uri.decode(it) }
                 if (wasPaused) media?.addFlags(MediaWrapper.MEDIA_PAUSED)
                 if (intent.hasExtra(PLAY_DISABLE_HARDWARE)) media?.addFlags(MediaWrapper.MEDIA_NO_HWACCEL)
+                // ATMOSphere [ATM-314] §C4 — when a prior HW-decode attempt
+                // errored or stalled, retryWithSoftwareDecode() set this flag so
+                // this reload forces SW decode (MEDIA_NO_HWACCEL → libvlc avcodec).
+                if (forceSoftwareDecode) media?.addFlags(MediaWrapper.MEDIA_NO_HWACCEL)
                 media!!.removeFlags(MediaWrapper.MEDIA_FORCE_AUDIO)
                 media.addFlags(MediaWrapper.MEDIA_VIDEO)
                 if (fromStart) media.addFlags(MediaWrapper.MEDIA_FROM_START)
@@ -2665,6 +2705,13 @@ open class VideoPlayerActivity : AppCompatActivity(), PlaybackService.Callback, 
     private fun startLoading() {
         if (isLoading) return
         isLoading = true
+        // ATMOSphere [ATM-314] §C4 — arm the HW-decode-fail stall watchdog. If
+        // no first frame (Vout) or Playing event clears loading within
+        // LOADING_TIMEOUT_DELAY the HW decoder is presumed stalled (no error
+        // emitted) and onLoadingTimeout() retries in SW. stopLoading() removes
+        // this message, so a normal load that produces a frame never fires it.
+        handler.removeMessages(LOADING_TIMEOUT)
+        handler.sendEmptyMessageDelayed(LOADING_TIMEOUT, LOADING_TIMEOUT_DELAY.toLong())
         val anim = AnimationSet(true)
         val rotate = RotateAnimation(0f, 360f, Animation.RELATIVE_TO_SELF, 0.5f, Animation.RELATIVE_TO_SELF, 0.5f)
         rotate.duration = 800
@@ -2680,10 +2727,50 @@ open class VideoPlayerActivity : AppCompatActivity(), PlaybackService.Callback, 
      */
     private fun stopLoading() {
         handler.removeMessages(LOADING_ANIMATION)
+        // ATMOSphere [ATM-314] §C4 — cancel the HW-decode-fail stall watchdog:
+        // a frame arrived (or buffering completed), so playback is healthy.
+        handler.removeMessages(LOADING_TIMEOUT)
         if (!isLoading) return
         isLoading = false
         loadingImageView.setInvisible()
         loadingImageView?.clearAnimation()
+    }
+
+    /**
+     * ATMOSphere [ATM-314] §C4 — HW-decode-fail stall watchdog handler.
+     *
+     * Fired LOADING_TIMEOUT_DELAY after the loading spinner started without a
+     * first decoded frame (Vout) or Playing event clearing it. This is the
+     * silent-stall variant of HW-decode failure (the RK3588 HW decoder neither
+     * outputs frames nor emits EncounteredError). Retry once in SW; if SW also
+     * stalls, give up on the auto-retry and clear the spinner so the user is not
+     * trapped on a frozen overlay.
+     */
+    private fun onLoadingTimeout() {
+        if (!isLoading) return
+        if (!hwDecodeRetried && !forceSoftwareDecode) {
+            Log.w(TAG, "[ATM-314] loading timeout — HW decoder stalled, retrying with software decode (MEDIA_NO_HWACCEL)")
+            retryWithSoftwareDecode()
+        } else {
+            Log.w(TAG, "[ATM-314] loading timeout after software-decode retry — clearing loading spinner")
+            stopLoading()
+        }
+    }
+
+    /**
+     * ATMOSphere [ATM-314] §C4 — restart the current media forcing software
+     * decode. Sets forceSoftwareDecode (consumed by loadMedia() → adds
+     * MEDIA_NO_HWACCEL) and marks hwDecodeRetried so this happens at most once
+     * per media open (no infinite reload loop). VLCOptions.setMediaOptions()
+     * already honours MEDIA_NO_HWACCEL → media.setHWDecoderEnabled(false,false),
+     * so VLC's internal avcodec SW decoders take over (they handle all formats
+     * incl. 4K reliably per the existing §341-346 RK3588 note in VLCOptions.kt).
+     */
+    private fun retryWithSoftwareDecode() {
+        hwDecodeRetried = true
+        forceSoftwareDecode = true
+        stopLoading()
+        loadMedia(forceUsingNew = true)
     }
 
     fun onClickDismissTips(@Suppress("UNUSED_PARAMETER") v: View) {
@@ -2809,11 +2896,22 @@ open class VideoPlayerActivity : AppCompatActivity(), PlaybackService.Callback, 
         const val FADE_OUT_BRIGHTNESS_INFO = 12
         const val FADE_OUT_VOLUME_INFO = 13
         const val FADE_OUT_SCREENSHOT = 14
+        // ATMOSphere [ATM-314] §C4 — HW-decode-fail stall watchdog. Fired
+        // LOADING_TIMEOUT_DELAY after the loading spinner starts; if no first
+        // frame (Vout) or Playing event has cleared loading by then, the HW
+        // decoder is presumed stalled and the media is reloaded with SW decode.
+        private const val LOADING_TIMEOUT = 15
         private const val KEY_REMAINING_TIME_DISPLAY = "remaining_time_display"
         const val KEY_BLUETOOTH_DELAY = "key_bluetooth_delay"
         val videoRemoteFlow = MutableStateFlow<String?>(null)
 
         private const val LOADING_ANIMATION_DELAY = 1000
+
+        // ATMOSphere [ATM-314] §C4 — how long to wait for the first decoded
+        // frame before treating a HW-decode request as stalled and retrying in
+        // SW. 8 s comfortably exceeds normal network buffering for local +
+        // streamed media while bounding the perpetual-spinner symptom.
+        private const val LOADING_TIMEOUT_DELAY = 8000
 
         @Volatile
         internal var sDisplayRemainingTime: Boolean = false
