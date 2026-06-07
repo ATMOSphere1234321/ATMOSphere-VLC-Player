@@ -228,6 +228,38 @@ fi
 # universal), whereas --signrelease → BUILDTYPE=signedRelease → assembleSignedRelease
 # → the SIGNED universal `VLC-Android-signed.apk` (which step 6 below prefers
 # first). Required because the prebuilt is PRESIGNED (AOSP does not re-sign).
+# §C3 build-fix (ATMOSphere) ATM-339: belt-and-suspenders stale-build-dir purge.
+# compile-libvlc.sh now reconfigures when its build-android-<tuple>/config.status
+# was configured for a different absolute prefix (the canonical case: a host-
+# configured build dir reused inside the §12.9 container where the AOSP tree is
+# mounted at /aosp, so the host-absolute -I.../contrib/... include paths baked
+# into the generated Makefiles point at non-existent dirs → src/extras/libc.c
+# fails `call to undeclared function 'iconv_open'`). This helper applies the SAME
+# precise condition one layer earlier so a stale host-configured leftover never
+# leaks into the build at all. Only a dir whose config.status does NOT reference
+# the CURRENT location is wiped — a valid in-place build dir is preserved (no
+# needless full reconfigure on repeat host runs).
+# Ref: qa-results/host_batch_119/VLC_BUILD_BLOCKER_RCA.md §2.3 / §4.A item 2.
+_vlc_src_dir=""
+if [ -f "$SCRIPT_DIR/libvlcjni/src/libvlc.h" ]; then
+    _vlc_src_dir="$SCRIPT_DIR/libvlcjni"
+elif [ -d "$SCRIPT_DIR/libvlcjni/vlc" ]; then
+    _vlc_src_dir="$SCRIPT_DIR/libvlcjni/vlc"
+fi
+if [ -n "$_vlc_src_dir" ]; then
+    for _bdir in "$_vlc_src_dir"/build-android-*; do
+        [ -d "$_bdir" ] || continue
+        _tuple="$(basename "$_bdir" | sed 's/^build-android-//')"
+        _expected_prefix="$_vlc_src_dir/contrib/$_tuple"
+        if [ -e "$_bdir/config.status" ] && \
+           ! grep -q -- "$_expected_prefix" "$_bdir/config.status" 2>/dev/null; then
+            echo "[ATMOSphere-VLC] purging stale build dir configured for a different prefix:"
+            echo "[ATMOSphere-VLC]   $_bdir (expected '$_expected_prefix' — not found in config.status)"
+            rm -rf "$_bdir"
+        fi
+    done
+fi
+
 echo "[ATMOSphere-VLC] running: buildsystem/compile.sh -a arm64 --signrelease"
 echo "[ATMOSphere-VLC]   (compiles libvlcjni via NDK r27/r28 then assembles + signs the universal APK)"
 bash buildsystem/compile.sh -a arm64 --signrelease
