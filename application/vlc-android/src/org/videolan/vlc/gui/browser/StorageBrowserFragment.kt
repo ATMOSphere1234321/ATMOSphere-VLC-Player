@@ -66,7 +66,10 @@ class StorageBrowserFragment : FileBrowserFragment(), BrowserContainer<MediaLibr
     // This fragment should never be displayed in cards. Forcing to false
     override var inCards: Boolean
         get() = false
-        set(_) {}
+        // JDK 9+ reserves `_` as a keyword; kapt transpiles the setter param literally,
+        // so `set(_)` generated an illegal `setInCards(boolean _)` stub that JDK-21 javac
+        // rejected (kaptReleaseKotlin failure). Empty body — param name is irrelevant.
+        set(value) {}
 
     override val categoryTitle: String
         get() = getString(R.string.directories_summary)
