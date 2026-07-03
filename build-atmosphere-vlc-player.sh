@@ -257,6 +257,31 @@ if [ -n "$_vlc_src_dir" ]; then
             echo "[ATMOSphere-VLC]   $_bdir (expected '$_expected_prefix' — not found in config.status)"
             rm -rf "$_bdir"
         fi
+        # ATM-343 (2026-06-23): mixed host/container config.status detection.
+        # The ATM-339 predicate above wipes a build dir whose config.status
+        # LACKS the expected prefix; but a config.status reused across the
+        # host↔§12.9-container boundary can record BOTH the current prefix AND
+        # a *foreign* absolute build-root path (host /run/media/.../contrib +
+        # container /aosp/.../contrib). That mixed state still satisfies the
+        # ATM-339 "expected prefix present" check yet bakes non-existent
+        # -I<foreign>/contrib/... include dirs into the generated Makefiles →
+        # live555 'UsageEnvironment.hh not found'. Detect + wipe: any absolute
+        # contrib/build-android root token recorded in config.status that is
+        # NOT under the current source root ($_expected_root) is a stale
+        # foreign build-root path and forces a full reconfigure.
+        # Ref: qa-results/host_batch_119/VLC_BUILD_BLOCKER_RCA.md §4.A item 2;
+        #      test_atm339_reconfigure_detection.sh CASE6/7/8.
+        _expected_root="$_vlc_src_dir"
+        if [ -d "$_bdir" ] && [ -e "$_bdir/config.status" ]; then
+            _foreign_roots="$(grep -oE '/[A-Za-z0-9._/+-]*/(contrib|build-android)[A-Za-z0-9._/+-]*' "$_bdir/config.status" 2>/dev/null \
+                | grep -vE "^${_expected_root}/" | sort -u)"
+            if [ -n "$_foreign_roots" ]; then
+                echo "[ATMOSphere-VLC] purging build dir with a stale foreign build-root path in config.status:"
+                echo "[ATMOSphere-VLC]   $_bdir (foreign roots not under '$_expected_root'):"
+                printf '[ATMOSphere-VLC]     %s\n' $_foreign_roots
+                rm -rf "$_bdir"
+            fi
+        fi
     done
 fi
 
