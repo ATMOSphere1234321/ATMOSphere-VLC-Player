@@ -1793,6 +1793,18 @@ open class VideoPlayerActivity : AppCompatActivity(), PlaybackService.Callback, 
                         service.addSubtitleTrack(subtitlesExtraPath!!, true)
                         subtitlesExtraPath = null
                     }
+                    // ATMOSphere [ATM-314] §C4b — arm the HW-decode-fail stall
+                    // watchdog HERE (start of every load, before the Playing
+                    // transition), not only via the isPlaying-gated Buffering
+                    // handler below. A HW-decoder init hang inside mediacodec
+                    // Open()/configure()/start() occurs BEFORE Playing fires, so
+                    // relying solely on the Buffering path left that window
+                    // unwatched (ATM-262 made HW-decode the default path, so this
+                    // window is now reachable by every default video load).
+                    // startLoading()/stopLoading() are idempotent (see §GS-3 on
+                    // the Vout handler below), so this is safe when the healthy-
+                    // load Buffering path also calls startLoading() moments later.
+                    startLoading()
                 }
                 MediaPlayer.Event.Vout -> {
                     // §GS-3: also clear loading on Playing/Vout (buffering may never hit 100% on SW decode).
