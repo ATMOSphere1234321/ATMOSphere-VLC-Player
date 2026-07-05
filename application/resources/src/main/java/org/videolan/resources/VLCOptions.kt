@@ -338,12 +338,22 @@ object VLCOptions {
             } catch (ignored: NumberFormatException) {}
 
         }
-        // ATMOSphere: Treat "automatic" (-1) as "disabled" on RK3588.
-        // RK3588 HW codecs (c2.rk.*) crash with BAD_INDEX/C2_BAD_VALUE on
-        // secondary display and WebView H.264 streams. VLC's internal avcodec
-        // SW decoders handle all formats including 4K reliably.
-        if (hardwareAcceleration == HW_ACCELERATION_AUTOMATIC)
-            hardwareAcceleration = HW_ACCELERATION_DISABLED
+        // ATM-262: REMOVED the former AUTOMATIC(-1) -> DISABLED(0) override.
+        // Prior comment claimed "RK3588 HW codecs (c2.rk.*) crash with
+        // BAD_INDEX/C2_BAD_VALUE" but VLC's mediacodec_ndk/mediacodec_jni
+        // modules use the NDK AMediaCodec* API, a code path independent from
+        // the framework Codec2 (c2.rk.*) crash class Fix #94/#99/#101/#107
+        // actually guards (docs/research/atm262_vlc_hw_decode/ANALYSIS.md
+        // §2.3-2.4). c2.rk.* remain disabled system-wide (Fix #107), so
+        // "automatic" here can only resolve to mediacodec_ndk/jni driving the
+        // SW c2.android.* codecs (or VLC's own avcodec SW fallback per
+        // decoder_t.mediacodec-failed) — it cannot re-select a disabled
+        // c2.rk.* codec, so this does NOT reintroduce the BAD_INDEX crash and
+        // does NOT touch the audio path (KEY_AUDIO_DIGITAL_OUTPUT / aout) at
+        // all. See docs/research/atm473_hw4k_decode_decision/ANALYSIS.md §6.4
+        // for why this is landed regardless of the separate Option A/B
+        // rkmpp-fork decision. On-device confirmation is PENDING-BUILD
+        // (§11.4.3) via device/rockchip/rk3588/tests/test_vlc_hw_hevc.sh.
         if (hardwareAcceleration == HW_ACCELERATION_DISABLED)
             media.setHWDecoderEnabled(false, false)
         else if (hardwareAcceleration == HW_ACCELERATION_FULL || hardwareAcceleration == HW_ACCELERATION_DECODING) {
