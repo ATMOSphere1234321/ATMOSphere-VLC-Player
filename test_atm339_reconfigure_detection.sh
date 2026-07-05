@@ -136,22 +136,41 @@ mkdir -p "$C3_BUILD"   # empty: no config.status
 if reconfigure_needed "$C3_BUILD" "$C3_PREFIX"; then RC3=0; else RC3=1; fi
 assert "CASE3 fresh-no-config.status" "KEEP" "$RC3"
 
-# ── CASE 4: source-fidelity — the SHIPPED compile-libvlc.sh predicate ─────
-# Guards against this test drifting from the real fix: assert the shipped
-# source contains the exact prefix-mismatch predicate this test mirrors.
+# ── CASE 4: source-fidelity — the ATM-339 inner-guard predicate is durably
+#    present, either already baked into the shipped compile-libvlc.sh (POST-
+#    PATCH state, only observable after a real wrapper/build invocation) OR
+#    guaranteed by the idempotent runtime-patch step in the project-owned
+#    wrapper build-atmosphere-vlc-player.sh (SOURCE-layer design state — the
+#    only state observable device-free per §11.4.108). libvlcjni/ is
+#    foreign-origin/gitignored and reset via `git reset --hard
+#    $LIBVLCJNI_TESTED_HASH` on every re-init, so a hand-edit of
+#    compile-libvlc.sh is NOT durable; the wrapper's runtime patch step IS
+#    the durable mechanism (see build-atmosphere-vlc-player.sh's
+#    ATM339-INNER-GUARD-PATCH marker + _atm339_patch_inner_guard()). Mirrors
+#    the same either/or check gate_atm339_builddir_isolation.sh's CHECK_B
+#    already performs, and the same "check the wrapper, not the foreign
+#    file" pattern CASE5 below already uses for the outer purge.
 SHIP_COMPILE="$SCRIPT_DIR/libvlcjni/buildsystem/compile-libvlc.sh"
-RC4=1   # default FAIL (not present)
-if [ -f "$SHIP_COMPILE" ] && \
-   grep -q 'VLC_EXPECTED_CONTRIB_PREFIX=.*VLC_SRC_DIR.*contrib.*TARGET_TUPLE' "$SHIP_COMPILE" && \
-   grep -q '! grep -q -- "\$VLC_EXPECTED_CONTRIB_PREFIX" "\$VLC_BUILD_DIR/config.status"' "$SHIP_COMPILE" && \
-   grep -q 'rm -rf "\$VLC_BUILD_DIR"' "$SHIP_COMPILE"; then
+SHIP_HELPER_CASE4="$SCRIPT_DIR/build-atmosphere-vlc-player.sh"
+_atm339_predicate_in() {
+    _f="$1"
+    [ -f "$_f" ] && \
+    grep -q 'VLC_EXPECTED_CONTRIB_PREFIX=.*VLC_SRC_DIR.*contrib.*TARGET_TUPLE' "$_f" && \
+    grep -q '! grep -q -- "\$VLC_EXPECTED_CONTRIB_PREFIX" "\$VLC_BUILD_DIR/config.status"' "$_f" && \
+    grep -q 'rm -rf "\$VLC_BUILD_DIR"' "$_f" && \
+    grep -q 'ATM339-INNER-GUARD-PATCH' "$_f"
+}
+RC4=1   # default FAIL (predicate absent from BOTH locations)
+if _atm339_predicate_in "$SHIP_COMPILE"; then
+    RC4=0
+elif _atm339_predicate_in "$SHIP_HELPER_CASE4"; then
     RC4=0
 fi
 if [ "$RC4" = "0" ]; then
-    log "  PASS: CASE4 source-fidelity — shipped compile-libvlc.sh carries the ATM-339 predicate"
+    log "  PASS: CASE4 source-fidelity — ATM-339 inner-guard predicate present (shipped compile-libvlc.sh post-patch, or the wrapper's durable runtime-patch step)"
     PASS=$((PASS + 1))
 else
-    log "  FAIL: CASE4 source-fidelity — shipped compile-libvlc.sh missing the ATM-339 predicate"
+    log "  FAIL: CASE4 source-fidelity — ATM-339 inner-guard predicate missing from BOTH shipped compile-libvlc.sh AND the wrapper's patch step"
     FAIL=$((FAIL + 1))
 fi
 

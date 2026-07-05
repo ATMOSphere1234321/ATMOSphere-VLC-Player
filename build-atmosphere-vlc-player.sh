@@ -285,6 +285,87 @@ if [ -n "$_vlc_src_dir" ]; then
     done
 fi
 
+# §C3 build-fix (ATMOSphere) ATM-339 (inner-guard, 2026-07-05): idempotent
+# RUNTIME PATCH of compile-libvlc.sh's own innermost reconfigure guard
+# (libvlcjni/buildsystem/compile-libvlc.sh:612). The outer purge above
+# (lines 243-286) only protects the scripts/build.sh -> step_build_vlc() ->
+# THIS wrapper -> buildsystem/compile.sh call chain. Two other entry points
+# bypass it entirely: buildsystem/compile-medialibrary.sh:45 sources
+# compile-libvlc.sh DIRECTLY (`AVLC_SOURCED=1 . libvlcjni/buildsystem/compile-libvlc.sh`),
+# and any manual/CI `bash buildsystem/compile.sh` or
+# `bash libvlcjni/buildsystem/compile-libvlc.sh` invocation. libvlcjni/ is
+# untracked/foreign-origin (VideoLAN upstream, .gitignore'd, reset via
+# `git reset --hard $LIBVLCJNI_TESTED_HASH` on every re-init per
+# buildsystem/compile.sh:307-339), so a one-time hand-edit of
+# compile-libvlc.sh would be silently LOST on any fresh clone / re-init --
+# the SAME reasoning this script's own author already applied to
+# vlc/contrib/src/main.mak (see CMAKE_POLICY_VERSION_MINIMUM above). This
+# step re-applies the SAME prefix-mismatch predicate the purge above already
+# computes (VLC_EXPECTED_CONTRIB_PREFIX mirrors _expected_prefix) directly
+# INTO compile-libvlc.sh's own guard, on EVERY invocation, guarded by the
+# ATM339-INNER-GUARD-PATCH marker for idempotency. Non-fatal by design: any
+# failure to patch (unwritable dir, upstream guard literal changed) WARNs
+# and falls back to the outer purge above rather than aborting the build --
+# this is defense-in-depth, not the sole protection for the primary path.
+# Ref: docs/requests/agent_status/atm339_vlc_stale_builddir_resume.md §3;
+#      docs/research/atm339_stale_builddir/gate_atm339_builddir_isolation.sh
+#      (CHECK_B / CHECK_C / CHECK_D); test_atm339_reconfigure_detection.sh CASE4.
+_atm339_patch_inner_guard() {
+    # $1 = path to compile-libvlc.sh. Returns: 0 = patched/already-patched/
+    # nothing-to-do; 2 = guard literal not found (upstream changed, non-fatal);
+    # 1 = unexpected failure (mktemp/awk/mv, non-fatal).
+    local _atm339_c="$1"
+    [ -f "$_atm339_c" ] || return 0
+    grep -q -- "ATM339-INNER-GUARD-PATCH" "$_atm339_c" 2>/dev/null && return 0
+    local _atm339_og='if [ ! -e $VLC_BUILD_DIR/config.h -o "$AVLC_RELEASE" = 1 ]; then'
+    grep -qF -- "$_atm339_og" "$_atm339_c" 2>/dev/null || return 2
+    local _atm339_snip
+    _atm339_snip="$(mktemp)" || return 1
+    # QUOTED heredoc: bash performs ZERO expansion, so the injected text keeps
+    # compile-libvlc.sh's OWN native (unescaped) $VLC_BUILD_DIR / $VLC_SRC_DIR /
+    # $TARGET_TUPLE syntax verbatim.
+    cat > "$_atm339_snip" <<'ATM339_INNER_GUARD_EOF'
+VLC_EXPECTED_CONTRIB_PREFIX="${VLC_SRC_DIR}/contrib/${TARGET_TUPLE}"
+if [ -e "$VLC_BUILD_DIR/config.status" ] && ! grep -q -- "$VLC_EXPECTED_CONTRIB_PREFIX" "$VLC_BUILD_DIR/config.status" 2>/dev/null; then
+    rm -rf "$VLC_BUILD_DIR"
+    mkdir -p "$VLC_BUILD_DIR"
+fi  # ATM339-INNER-GUARD-PATCH
+ATM339_INNER_GUARD_EOF
+    local _atm339_mode
+    _atm339_mode="$(stat -c '%a' "$_atm339_c" 2>/dev/null || echo 755)"
+    local _atm339_tmp
+    _atm339_tmp="$(mktemp "$(dirname "$_atm339_c")/.atm339_patch.XXXXXX" 2>/dev/null)" || { rm -f "$_atm339_snip"; return 1; }
+    if ! awk -v snippet="$_atm339_snip" -v guard="$_atm339_og" '
+            $0 == guard { while ((getline line < snippet) > 0) print line; close(snippet) }
+            { print }
+        ' "$_atm339_c" > "$_atm339_tmp"; then
+        rm -f "$_atm339_snip" "$_atm339_tmp"
+        return 1
+    fi
+    mv "$_atm339_tmp" "$_atm339_c" 2>/dev/null || { rm -f "$_atm339_snip" "$_atm339_tmp"; return 1; }
+    chmod "$_atm339_mode" "$_atm339_c" 2>/dev/null || true
+    rm -f "$_atm339_snip"
+    grep -q -- "ATM339-INNER-GUARD-PATCH" "$_atm339_c" 2>/dev/null || return 1
+    return 0
+}
+
+if [ -n "$_vlc_src_dir" ]; then
+    _atm339_compile_libvlc="$_vlc_src_dir/buildsystem/compile-libvlc.sh"
+    if _atm339_patch_inner_guard "$_atm339_compile_libvlc"; then
+        _atm339_rc=0
+    else
+        _atm339_rc=$?
+    fi
+    case "$_atm339_rc" in
+        0) : ;;
+        2) echo "[ATMOSphere-VLC] ATM-339: old guard literal not found verbatim in $_atm339_compile_libvlc (upstream changed?) -- skipping inner patch; the outer purge above still applies" ;;
+        *) echo "[ATMOSphere-VLC] WARNING: ATM-339 inner guard patch failed for $_atm339_compile_libvlc (non-fatal; outer purge above still applies)" ;;
+    esac
+    if [ -f "$_atm339_compile_libvlc" ] && grep -q -- "ATM339-INNER-GUARD-PATCH" "$_atm339_compile_libvlc" 2>/dev/null; then
+        echo "[ATMOSphere-VLC] ATM-339: inner reconfigure-guard patch is present in $_atm339_compile_libvlc"
+    fi
+fi
+
 echo "[ATMOSphere-VLC] running: buildsystem/compile.sh -a arm64 --signrelease"
 echo "[ATMOSphere-VLC]   (compiles libvlcjni via NDK r27/r28 then assembles + signs the universal APK)"
 bash buildsystem/compile.sh -a arm64 --signrelease
