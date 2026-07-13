@@ -366,6 +366,86 @@ if [ -n "$_vlc_src_dir" ]; then
     fi
 fi
 
+# ─────────────────────────────────────────────────────────────────────────
+# GCC-15 / C23 build-fix (ATMOSphere) — nasm 2.14 host-tool build.
+# ─────────────────────────────────────────────────────────────────────────
+# Host GCC >= 15 defaults to -std=gnu23 (C23), where `bool` is a native
+# keyword. VLC's host-tool bootstrap (vlc/extras/tools) builds nasm 2.14
+# from source. nasm 2.14's autoconf AC_HEADER_STDBOOL test FAILS under the
+# C23 default, leaving HAVE_STDBOOL_H UNDEFINED + HAVE__BOOL defined, so
+# include/compiler.h takes the `#elif defined(HAVE__BOOL)` branch whose
+# line 166 is a latent nasm source bug (`#  typedef _Bool bool`, parsed as
+# an invalid `#typedef` preprocessing directive) →
+# `error: invalid preprocessing directive #typedef` → the host nasm build
+# aborts → tools.mak `.buildnasm` fails → the whole VLC fork build fails.
+# The canonical distro fix (openSUSE GCC-15 packaging, conan-center-index
+# nasm/2.14 #3996, trofi "gcc-15 switched to C23") is to compile the
+# affected host tool under a pre-C23 standard: passing CFLAGS="-std=gnu17"
+# to nasm's ./configure makes AC_HEADER_STDBOOL pass → HAVE_STDBOOL_H
+# defined → the good `#include <stdbool.h>` branch is taken; the remaining
+# nasm compile then builds cleanly (warnings only) under the default gnu23.
+# Root cause PROVEN (§11.4.6, reproduced on host gcc 15.2.1,
+# __STDC_VERSION__ 202311L: config.h HAVE_STDBOOL_H flips undef→1 with the
+# flag, and `make` then builds nasm 2.14 with rc=0).
+#
+# tools.mak is part of the FETCHED VLC source (vlc/, .gitignore'd; get-vlc.sh
+# only RESETS it on a fresh clone or explicit --reset, and leaves a warm tree
+# untouched), so a one-time hand-edit would be silently LOST on a fresh
+# clone/re-init — the SAME reasoning as the CMAKE_POLICY_VERSION_MINIMUM and
+# ATM-339 fixes above. This step re-applies the fix idempotently on EVERY
+# invocation, guarded by the GCC15-NASM-C23-COMPAT marker. It is a GENERIC
+# toolchain-compat fix — NO ATMOSphere-specific context (§11.4.28(B)
+# decoupling). Non-fatal: any failure WARNs and falls through (the nasm
+# build then fails loudly, as before).
+_gcc15_patch_nasm_tools_mak() {
+    # $1 = path to VLC extras/tools/tools.mak. Returns 0 = patched / already-
+    # patched / nothing-to-do; 2 = target recipe line not found verbatim
+    # (upstream changed, non-fatal); 1 = unexpected failure (non-fatal).
+    local _mak="$1"
+    [ -f "$_mak" ] || return 0
+    grep -q -- "GCC15-NASM-C23-COMPAT" "$_mak" 2>/dev/null && return 0
+    grep -qE '^\.buildnasm:' "$_mak" 2>/dev/null || return 2
+    local _mode
+    _mode="$(stat -c '%a' "$_mak" 2>/dev/null || echo 644)"
+    local _tmp
+    _tmp="$(mktemp "$(dirname "$_mak")/.gcc15nasm.XXXXXX" 2>/dev/null)" || return 1
+    # Append CFLAGS="-std=gnu17" ONLY to the ./configure line INSIDE the
+    # .buildnasm target block. tools.mak has many identical
+    # `cd $<; ./configure --prefix=$(PREFIX)` lines for other tools, so the
+    # match is strictly scoped to the .buildnasm recipe. The trailing
+    # `# GCC15-NASM-C23-COMPAT` is a shell comment on the recipe line (make
+    # passes recipe lines verbatim to the shell) — harmless + greppable for
+    # idempotency.
+    if ! awk '
+            /^\.buildnasm:/ { innasm=1 }
+            innasm && !done && /cd \$<; \.\/configure --prefix=\$\(PREFIX\)$/ {
+                print $0 " CFLAGS=\"-std=gnu17\"  # GCC15-NASM-C23-COMPAT"
+                done=1; innasm=0; next
+            }
+            /^[^[:blank:]#]/ && !/^\.buildnasm:/ { innasm=0 }
+            { print }
+        ' "$_mak" > "$_tmp"; then
+        rm -f "$_tmp"; return 1
+    fi
+    grep -q -- "GCC15-NASM-C23-COMPAT" "$_tmp" 2>/dev/null || { rm -f "$_tmp"; return 2; }
+    mv "$_tmp" "$_mak" 2>/dev/null || { rm -f "$_tmp"; return 1; }
+    chmod "$_mode" "$_mak" 2>/dev/null || true
+    return 0
+}
+
+if [ -n "$_vlc_src_dir" ]; then
+    _gcc15_nasm_mak="$_vlc_src_dir/extras/tools/tools.mak"
+    if _gcc15_patch_nasm_tools_mak "$_gcc15_nasm_mak"; then
+        echo "[ATMOSphere-VLC] GCC15-NASM-C23-COMPAT: nasm ./configure gets CFLAGS=-std=gnu17 in $_gcc15_nasm_mak"
+    else
+        _gcc15_rc=$?
+        case "$_gcc15_rc" in
+            2) echo "[ATMOSphere-VLC] GCC15-NASM-C23-COMPAT: .buildnasm recipe not found verbatim in $_gcc15_nasm_mak (upstream changed?) — skipping (non-fatal; nasm build may fail under host gcc>=15)" ;;
+            *) echo "[ATMOSphere-VLC] WARNING: GCC15-NASM-C23-COMPAT patch failed for $_gcc15_nasm_mak (non-fatal; nasm build may fail under host gcc>=15)" ;;
+        esac
+    fi
+fi
+
 echo "[ATMOSphere-VLC] running: buildsystem/compile.sh -a arm64 --signrelease"
 echo "[ATMOSphere-VLC]   (compiles libvlcjni via NDK r27/r28 then assembles + signs the universal APK)"
 bash buildsystem/compile.sh -a arm64 --signrelease
