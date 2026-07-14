@@ -446,6 +446,138 @@ if [ -n "$_vlc_src_dir" ]; then
     fi
 fi
 
+# ─────────────────────────────────────────────────────────────────────────
+# Container↔host contrib-prefix relocation (ATM-745).
+# ─────────────────────────────────────────────────────────────────────────
+# VLC's contrib install tree (contrib/<tuple>/) bakes its build-time ABSOLUTE
+# prefix into every pkg-config .pc (Cflags/Libs), every libtool .la, every
+# *-config helper script, and any generated *.cmake. When contrib is built
+# inside the §12.9 container (AOSP tree mounted at /aosp) and the build is then
+# re-run on the HOST (tree at its real path, /aosp absent), those baked prefixes
+# point at the non-existent /aosp/... — so `pkg-config --cflags opus` / `... oapv`
+# return `-I/aosp/.../include/opus` / `.../include/oapv`, dirs that do not exist.
+# opus + oapv fail FIRST because their VLC modules do a BARE `#include <opus.h>`
+# / `#include <oapv.h>` and reach the header ONLY via that .pc-provided subdir
+# -I (their headers install into include/opus/ and include/oapv/, not include/
+# directly) →
+#   modules/codec/opus.c:39:   fatal error: 'opus.h' file not found
+#   modules/codec/openapv.c:20: fatal error: 'oapv.h' file not found
+# (every other contrib reaches its header via the base -I<prefix>/include the
+# modules build adds itself with the correct host path). The companion
+# build-android-<tuple>/config.status host↔container mismatch is already
+# wiped+reconfigured by the ATM-343 outer purge + ATM-339 inner guard above;
+# this step fixes the INSTALL tree those defenses do NOT touch.
+#
+# Fix: VLC ships its OWN canonical relocation tool for exactly this (prebuilt
+# contribs are downloaded with a server-set prefix) — contrib/src/change_prefix.sh
+# (invoked by contrib/src/main.mak:580 `cd $(PREFIX) && change_prefix.sh` for the
+# `prebuilt` target). Reuse it verbatim (§11.4.8 — no reinvention): detect any
+# baked .pc `prefix=` root that differs from the install dir's real host path and
+# run change_prefix.sh <old> <new>. It rewrites bin/*, lib/*.la, lib/pkgconfig/*.pc;
+# it does NOT touch lib/cmake/**/*.cmake, so extend to those. Idempotent by the
+# mismatch check (already-host-correct → no-op) — heals host→container AND
+# container→host in either direction. GENERIC toolchain-relocation, NO ATMOSphere
+# context (§11.4.28(B) decoupling). Non-fatal: any failure WARNs and the build
+# then fails loudly at the same opus/oapv step, as before.
+# Root cause PROVEN (§11.4.6): all 68 .pc + 30 .la + 4 *-config + 1 .cmake baked
+# prefix=/aosp/...; /aosp absent on host; post-relocation `pkg-config --cflags
+# opus oapv` resolves to the host include/opus + include/oapv dirs that EXIST and
+# contain opus.h / oapv.h.
+_relocate_contrib_prefix() {
+    # $1 = VLC source dir containing contrib/. Non-fatal on every path.
+    local _src="$1"
+    [ -d "$_src/contrib" ] || return 0
+    local _cp="$_src/contrib/src/change_prefix.sh"
+    if [ ! -f "$_cp" ]; then
+        echo "[ATMOSphere-VLC] ATM-745: change_prefix.sh absent ($_cp) — skipping contrib relocation (non-fatal)"
+        return 0
+    fi
+    local _pcdir _root _new _olds _o _cm
+    for _pcdir in "$_src"/contrib/*/lib/pkgconfig; do
+        [ -d "$_pcdir" ] || continue
+        _root="$(cd "$_pcdir/../.." 2>/dev/null && pwd -P)" || continue
+        [ -n "$_root" ] || continue
+        _new="$_root"
+        # distinct baked .pc prefixes that differ from the real host install root
+        _olds="$(grep -h '^prefix=' "$_pcdir"/*.pc 2>/dev/null | sed 's/^prefix=//' | sort -u | grep -vxF "$_new" || true)"
+        [ -n "$_olds" ] || continue   # already host-correct → idempotent no-op
+        printf '%s\n' "$_olds" | while IFS= read -r _o; do
+            [ -n "$_o" ] || continue
+            echo "[ATMOSphere-VLC] ATM-745: relocating contrib prefix (container↔host):"
+            echo "[ATMOSphere-VLC]   old: $_o"
+            echo "[ATMOSphere-VLC]   new: $_new"
+            if ! ( cd "$_root" && sh "$_cp" "$_o" "$_new" ) >/dev/null 2>&1; then
+                echo "[ATMOSphere-VLC] WARNING: ATM-745 change_prefix.sh failed for '$_o' (non-fatal)"
+            fi
+            # change_prefix.sh omits *.cmake — extend for completeness.
+            find "$_root" -name '*.cmake' -type f 2>/dev/null | while IFS= read -r _cm; do
+                if grep -q -- "$_o" "$_cm" 2>/dev/null; then
+                    sed -i "s,$_o,$_new,g" "$_cm" 2>/dev/null || true
+                    echo "[ATMOSphere-VLC]   (cmake) $_cm"
+                fi
+            done || true
+        done || true
+    done
+    return 0
+}
+
+if [ -n "$_vlc_src_dir" ]; then
+    _relocate_contrib_prefix "$_vlc_src_dir"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────
+# VLC host-tools PATH + container↔host medialibrary re-setup (ATM-755).
+# ─────────────────────────────────────────────────────────────────────────
+# Two coupled container→host reuse defects in the medialibrary sub-build,
+# both surfacing only now that ATM-745 lets the build reach medialibrary:
+#
+# (A) PATH-scoping bug in buildsystem/compile-medialibrary.sh — it exports
+#     PATH="…/vlc/extras/tools/build/bin:$PATH" (where its meson wrapper +
+#     ninja live) ONLY inside the `if [ ! -d build-android-<abi> ] ||
+#     [ ! -f …/build.ninja ]` meson-SETUP block (compile-medialibrary.sh:196),
+#     but `meson compile` / `meson install` (:221-222) run UNCONDITIONALLY
+#     outside it. Whenever the setup block is skipped (a warm/valid
+#     build-android dir), meson is NOT on PATH →
+#       compile-medialibrary.sh: line 221: meson: command not found
+#     (VLC's extras/tools DID build meson+ninja — .buildmeson/.buildninja
+#     stamps present — so this is a PATH gap, not a missing tool). Put the
+#     VLC host-tools bin on PATH for the WHOLE compile.sh chain here so meson
+#     is found regardless of the sub-script's conditional scoping. Durable:
+#     also fixes every REPEAT host build (where a host-valid warm dir
+#     legitimately skips setup and would otherwise re-hit the PATH gap).
+#
+# (B) The reused medialibrary build-android-<abi>/build.ninja is container-
+#     configured: it bakes the §12.9 container prefix /aosp/... (75 refs, 0
+#     host refs) for the compiler/include/contrib paths. Even with meson on
+#     PATH (A), `meson compile` against that build.ninja would fail (all
+#     -I/-L point at the non-existent /aosp/...). Wipe a build-android dir
+#     whose build.ninja references a contrib/build-android path NOT under the
+#     host root so the setup block re-runs and regenerates build.ninja with
+#     HOST paths — the medialibrary analogue of the ATM-343 libvlc
+#     build-android purge above. Only a foreign-configured dir is wiped (a
+#     valid host dir is preserved → no needless full medialibrary
+#     reconfigure on repeat runs).
+#
+# GENERIC toolchain fixes, NO ATMOSphere context (§11.4.28(B)). Root cause
+# PROVEN (§11.4.6): compile-medialibrary.sh:195-212 scopes the PATH export;
+# the reused build.ninja has 75 /aosp refs and 0 host refs.
+if [ -n "$_vlc_src_dir" ] && [ -d "$_vlc_src_dir/extras/tools/build/bin" ]; then
+    export PATH="$_vlc_src_dir/extras/tools/build/bin:$PATH"
+    echo "[ATMOSphere-VLC] ATM-755(A): VLC host-tools on PATH: $_vlc_src_dir/extras/tools/build/bin (meson/ninja/nasm/…)"
+fi
+for _mlbdir in "$SCRIPT_DIR"/medialibrary/medialibrary/build-android-*; do
+    [ -d "$_mlbdir" ] || continue
+    _mlbn="$_mlbdir/build.ninja"
+    [ -f "$_mlbn" ] || continue   # no build.ninja → setup re-runs anyway
+    _mlforeign="$( { grep -oE '/[A-Za-z0-9._/+-]*/(contrib|build-android)[A-Za-z0-9._/+-]*' "$_mlbn" 2>/dev/null \
+        | grep -vE "^${SCRIPT_DIR}/" | sort -u | head -1 ; } || true )"
+    if [ -n "$_mlforeign" ]; then
+        echo "[ATMOSphere-VLC] ATM-755(B): wiping container-configured medialibrary build dir (foreign path in build.ninja):"
+        echo "[ATMOSphere-VLC]   $_mlbdir (e.g. '$_mlforeign' not under '$SCRIPT_DIR')"
+        rm -rf "$_mlbdir"
+    fi
+done
+
 echo "[ATMOSphere-VLC] running: buildsystem/compile.sh -a arm64 --signrelease"
 echo "[ATMOSphere-VLC]   (compiles libvlcjni via NDK r27/r28 then assembles + signs the universal APK)"
 bash buildsystem/compile.sh -a arm64 --signrelease
